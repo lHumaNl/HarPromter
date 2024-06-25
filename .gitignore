@@ -1,0 +1,5 @@
+.venv
+*.json
+*.yaml
+*.har
+.idea
