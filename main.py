@@ -53,9 +53,10 @@ def convert_headers(headers, exclude_standard_headers):
 
 
 def filter_entries(entries, exclude_static=True, exclude_cookies=False, exclude_standard_headers=False):
-    filtered_entries = []
+    filtered_entries = {}
     static_values = ['.css', '.js', '.png', '.svg', '.jpg', '.jpeg', '.gif', '.woff', '.woff2', '.ttf']
-    for entry in entries:
+
+    for index, entry in enumerate(entries):
         request = entry['request']
         response = entry['response']
 
@@ -106,13 +107,14 @@ def filter_entries(entries, exclude_static=True, exclude_cookies=False, exclude_
             content_text = content.get('text', '')
             filtered_entry['response']['content'] = decode_data(content_text)
 
-        filtered_entries.append(filtered_entry)
+        filtered_entries[index] = filtered_entry
+
     return filtered_entries
 
 
 def create_dict(entries, key, exclude_cookies):
     counter = Counter()
-    for entry in entries:
+    for entry in entries.values():
         if key == 'cookies' and exclude_cookies:
             continue
         items = entry['request'].get(key, []) + entry['response'].get(key, [])
@@ -134,7 +136,7 @@ def create_dict(entries, key, exclude_cookies):
 def replace_items_with_references(entries, item_dict, key):
     item_to_index = {json.dumps(v): k for k, v in item_dict.items()}
 
-    for entry in entries:
+    for entry_key, entry in entries.items():
         for side in ['request', 'response']:
             items = entry[side].get(key, [])
             new_items = []
@@ -150,19 +152,17 @@ def replace_items_with_references(entries, item_dict, key):
 
 
 def minimize_json(data):
-    return json.dumps(data, ensure_ascii=False)
+    return json.dumps(data, ensure_ascii=False, sort_keys=True)
 
 
-def save_json_file(data, file_path, prompt):
+def save_json_file(data, file_path):
     with open(file_path, 'w', encoding='utf-8') as f:
-        f.write(prompt + os.linesep)
         f.write(data)
 
 
-def save_yaml_file(data, file_path, prompt):
+def save_yaml_file(data, file_path):
     with open(file_path, 'w', encoding='utf-8') as f:
-        f.write(prompt + os.linesep)
-        yaml.dump(data, f, allow_unicode=True)
+        yaml.dump(data, f, allow_unicode=True, sort_keys=True)
 
 
 def decode_data(data):
@@ -187,14 +187,85 @@ def process_har_file(file_path, exclude_static=True, exclude_cookies=False, excl
     if not exclude_cookies:
         minimized_entries = replace_items_with_references(minimized_entries, cookie_dict, 'cookies')
 
+    sorted_entries = {}
+
+    for index, value in enumerate(minimized_entries, 1):
+        sorted_entries[index] = minimized_entries[value]
+
     data = {
-        "entries": minimized_entries,
+        "entries": sorted_entries,
         "header_dict": header_dict,
     }
     if not exclude_cookies:
         data["cookie_dict"] = cookie_dict
 
     return data
+
+
+def get_requests_str_for_prompt(data):
+    http_str = ''
+    for key, value in data["entries"].items():
+        if "comment" in value:
+            http_str += f'{key}: {value["comment"]} {value["request"]["method"]} {value["request"]["url"]}'
+        else:
+            http_str += f'{key}: {value["request"]["method"]} {value["request"]["url"]}'
+
+        http_str += os.linesep
+
+    return http_str
+
+
+def print_prompt(file_name, format_name, http_str):
+    print(
+        '''!!!IMPORTANT!!! You need to open attached file (''' + file_name + ''') and start analyzing it according to the description provided below !!!IMPORTANT!!! 
+The file ''' + file_name + ''' attached contains optimized HTTP traffic data corresponding to a specific schema (see the "File Schema" section) and has a ''' + format_name + ''' structure obtained from a HAR file.
+
+File Schema:
+1. The keys header_dict and cookie_dict (cookie_dict may be absent) contain dictionaries (the structure for header_dict and cookie_dict is the same), where:
+1.1 Key: a numerical ID, which serves as a reference that will be used by values from the keys headers and cookies (e.g., "1", "2", "3", etc.)
+1.2 Value: a dictionary, where:
+1.2.1 Key: the name of the header or cookie (e.g., "Content-Type", "User-Agent", "Set-Cookie")
+1.2.2 Value: the value of the header or cookie (e.g., "application/json", "Mozilla/5.0", "sessionid=abc123")
+
+2. The key entries contains dictionaries, where:
+2.1 Key: the ordinal number of the request (e.g., "1", "2", "3", etc.)
+2.2 Value: a dictionary with data on a specific HTTP request, including the following keys:
+2.2.1 comment: comment on the request from the har file (may be absent)
+
+2.2.2 request: a dictionary with request data, including the following keys:
+2.2.2.1 method: HTTP method (e.g., "GET", "POST")
+2.2.2.2 url: full URL (e.g., "https://example.com/api/resource")
+2.2.2.3 queryString: query parameters sent in the URL (e.g., [{"name": "value"}, {"id": "123"}])
+2.2.2.4 postData: data sent in the request body (can be an array of dictionaries if it is multiPart data, or a string if the body is text)
+2.2.2.5 headers: array of request headers (if the value is an int, it refers to a header from the header_dict key; if it is a dictionary, the key is the header name, and the value is its value)
+2.2.2.6 cookies: array of request cookies (values are similar to the headers key, except that references point to the cookie_dict key. the key may be absent)
+
+2.2.3 response: response data, including the following keys:
+2.2.3.1 redirectURL: redirect URL
+2.2.3.2 status: response code (e.g., 200, 404)
+2.2.3.3 content: response body
+2.2.3.4 headers: array of response headers (value types are similar to the headers key from the request key)
+2.2.3.5 cookies: array of response cookies (value types are similar to the cookies key from the request key. the key may be absent)
+
+List of HTTP requests in the attached analyzed file (with comments, which may be absent) from the entries key:
+''' + http_str + '''
+
+You need to perform the following actions for successful analysis:
+1. Analyze the file structure according to its schema (see the "File Schema" section) and memorize it (for simplification, a list of HTTP requests of this file is provided above).
+2. From the analyzed file structure, analyze HTTP requests by the sent query parameters and body, identifying what needs to be correlated when creating load testing scripts (identifiers, dates, tokens, etc.) for software like JMeter\Gatling\HP Loadrunner, and which are likely static and do not require correlation (your task, in essence, will be analogous to the "autocorrelation" feature in HP Loadrunner VuGen).
+2.1. Determine from which HTTP request responses the required data can be obtained.
+2.2. Describe how these data can be extracted from there (e.g., using JsonPath or RegEx).
+2.3. Note that correlated data may include dynamically generated identifiers, timestamps, and tokens that change with each request.
+
+Examples of parameterizable data:
+- Session identifiers such as "sessionid" or "cfids"
+- Timestamps such as "Date" or "Expires"
+- Tokens used for authorization or authentication
+- ID parameters
+- Certain numerical or symbolic parameters
+
+File for analysis attached:
+''' + file_name)
 
 
 def main():
@@ -208,90 +279,32 @@ def main():
 
     args = parser.parse_args()
 
-    data_with_prompt = process_har_file(args.input, exclude_static=args.no_static, exclude_cookies=args.no_cookies,
-                                        exclude_standard_headers=args.no_standard_headers)
+    data = process_har_file(args.input, exclude_static=args.no_static, exclude_cookies=args.no_cookies,
+                            exclude_standard_headers=args.no_standard_headers)
 
-    token_count_json = count_tokens(minimize_json(data_with_prompt))
-    token_count_yaml = count_tokens(yaml.dump(data_with_prompt, allow_unicode=True))
+    http_str = get_requests_str_for_prompt(data)
+    token_count_json = count_tokens(minimize_json(data))
+    token_count_yaml = count_tokens(yaml.dump(data, allow_unicode=True))
     print(f"Total tokens in JSON format: {token_count_json}, in YAML format: {token_count_yaml}")
 
-    prompt = '''This JSON file contains HTTP request and response data extracted and processed from a HAR (HTTP Archive) file. The data has been meticulously filtered to exclude static resources (e.g., .css, .js files) and minimized for efficient processing. Common headers and cookies, occurring frequently across multiple requests and responses, are stored in separate dictionaries ('header_dict' and 'cookie_dict') with unique identifiers to reduce repetition. Each entry in this file includes both 'request' and 'response' objects.
-
-### How to Analyze This File
-
-1. **Understanding the Structure**:
-   - **entries**: This array holds individual HTTP transactions. Each transaction has a 'request' and a 'response' object.
-   - **header_dict**: A dictionary of frequently occurring headers, referenced by unique identifiers within the entries.
-   - **cookie_dict**: A dictionary of frequently occurring cookies, referenced similarly (included only if cookies are not excluded during processing).
-
-2. **Components of Each Entry**:
-   - **request**: Contains details about the HTTP request, including the method, URL, headers, cookies (if included), and postData (if available).
-   - **response**: Contains details about the HTTP response, including the status, headers, cookies (if included), and content.
-   - **postData**: If present in the request, it includes both the original and decoded data, which might be in URL-encoded or base64 format.
-
-3. **Interpreting Headers and Cookies**:
-   - Headers and cookies that appear frequently across requests and responses are referenced by identifiers (e.g., `1`, `2`) within the `header_dict` and `cookie_dict`. These references reduce redundancy and make the file more compact.
-   - To understand the actual values of these referenced headers and cookies, look up the identifier in the corresponding dictionary.
-
-### Steps for Detailed Analysis:
-
-1. **Correlation and Pagination Analysis**:
-   - **Correlation Analysis**: Identify patterns and relationships between different parameters and values in requests and responses. For instance, correlate query parameters with response statuses or content lengths.
-   - **Pagination Analysis**: Determine how pagination parameters (e.g., `page`, `limit`) are used in requests and how they affect the responses.
-
-2. **Extraction and Replacement Using jsonPath and RegEx**:
-   - **jsonPath**: Utilize jsonPath expressions to precisely extract specific parameters and their values from the JSON structure.
-   - **RegEx**: Use regular expressions to match patterns in the data, especially useful for dynamically generated values or complex query parameters.
-   
-### Examples:
-
-1. **Finding Query Parameters**:
-   - Use jsonPath: `$.entries[*].request.queryString[*]`
-   - Use RegEx: `\"queryString\": \[\{.*?\}\]`
-
-2. **Extracting Specific Headers**:
-   - Use jsonPath to find a specific header (e.g., `Content-Type`): `$.entries[*].request.headers[?(@.name == 'Content-Type')].value`
-   - Use RegEx to match headers: `\"headers\": \[\{.*?\"name\": \"Content-Type\".*?\}\]`
-
-3. **Analyzing Pagination**:
-   - jsonPath for pagination parameters: `$.entries[*].request.queryString[?(@.name == 'page' || @.name == 'limit')].value`
-   - RegEx to match pagination: `\"queryString\": \[\{.*?\"name\": \"(page|limit)\".*?\}\]`
-
-4. **Correlating Data**:
-   - Find requests with specific response statuses: `$.entries[?(@.response.status == 200)].request.url`
-   - Correlate request methods with response times: `$.entries[*].{method: request.method, time: response.time}`
-
-### Example Workflow:
-
-1. **Identify frequently used headers and cookies**:
-   - Look up identifiers in `header_dict` and `cookie_dict`.
-
-2. **Extract specific values for analysis**:
-   - Use jsonPath or RegEx to extract parameters of interest.
-
-3. **Correlate extracted values**:
-   - Analyze patterns and relationships between different parameters and their effects on responses.
-
-By following these steps, you can systematically analyze the processed HAR file, uncovering valuable insights about the HTTP transactions, and effectively extract and manipulate the necessary parameters using jsonPath and RegEx.
-
-'''
-
-    file_name = ''
     if args.format == 'json':
         if not args.output.endswith('.json'):
             file_name = args.output + '.json'
         else:
             file_name = args.output
 
-        minimized_data = minimize_json(data_with_prompt)
-        save_json_file(minimized_data, file_name, prompt)
+        minimized_data = minimize_json(data)
+
+        print_prompt(file_name, args.format.upper(), http_str)
+        save_json_file(minimized_data, file_name)
     elif args.format == 'yaml':
         if not args.output.endswith('.yaml'):
             file_name = args.output + '.yaml'
         else:
             file_name = args.output
 
-        save_yaml_file(data_with_prompt, file_name, prompt)
+        print_prompt(file_name, args.format.upper(), http_str)
+        save_yaml_file(data, file_name)
 
 
 if __name__ == '__main__':
